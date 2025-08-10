@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     id SERIAL PRIMARY KEY, 
     project_id INTEGER REFERENCES projects(project_id),
     category VARCHAR(100),  --tech_choice, design_decision, etc.
-    decisions TEXT NOT NULL,
+    decision TEXT NOT NULL,
     reasoning TEXT,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

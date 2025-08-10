@@ -1,6 +1,14 @@
 import click
 import os
 import sys
+from models import DatabaseManager
+from rich.console import Console
+from rich.table import Table
+from memory import MemoryManager
+from datetime import datetime
+
+# Initialize rich console for beautiful output
+console = Console()
 
 # Add src directory to path so we can import our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +28,7 @@ def validate_command(target, action):
     if target not in VALID_TARGETS:
         # Assume it a file or folder path - check existence
         if not file_exists(target) and not folder_exists(target):
-            click.echo(f"Warning: {target} does not exit")
+            click.echo(f"Warning: {target} does not exist")
 
     return True
 
@@ -49,6 +57,7 @@ def cli():
 @cli.command()
 @click.argument('target')
 @click.argument('action')
+
 def main(target, action,deep, ultra, debug, code, explain, quick, manager, watch, interactive, batch, dry_run, allow_all):
     """Main Command: ridge [target] [action]"""
 
@@ -72,6 +81,133 @@ def main(target, action,deep, ultra, debug, code, explain, quick, manager, watch
     click.echo(f"Action: {action}")
     click.echo(f"Mode flags: {active_modes}")
     click.echo(f"Behavior flags: {active_behaviors}")
+
+@cli.group()
+def memory():
+    """Memory management commands"""
+    pass
+
+@memory.command()
+@click.argument('project_name')
+def init(project_name):
+    """Initialize memory for a new project"""
+    console.print(f"🧠 Initializing memory for project: [bold]{project_name}[/bold]")
+    
+    memory_manager = MemoryManager()
+    project_data, is_new = memory_manager.init_project(project_name)
+
+    if is_new:
+        console.print(f"✅ New project '[bold]{project_name}[/bold]' created and activated")
+    else:
+        console.print(f"✅ Existing project '[bold]{project_name}[/bold]' reactivated")
+    
+    console.print(f"📁 Project path: {project_data['path']}")
+
+@memory.command()
+def status():
+    """Show current project memory status"""
+    memory_manager = MemoryManager()
+    project = memory_manager.get_current_project()
+    
+    if not project:
+        console.print("❌ No active project found. Run 'ridge memory init [project_name]' first")
+        return
+    
+    console.print(f"📊 Memory Status for [bold]{project.name}[/bold]")
+    
+    # Get recent activity
+    activity = memory_manager.get_recent_activity()
+    
+    if activity:
+        table = Table(title="Recent Activity (Last 7 Days)")
+        table.add_column("Type", style="cyan")
+        table.add_column("Description", style="magenta")
+        table.add_column("Time", style="green")
+        
+        for item in activity[:10]:  # Show last 10 items
+            # Calculate relative time
+            time_diff = datetime.utcnow() - item['timestamp']
+            if time_diff.days > 0:
+                time_str = f"{time_diff.days} days ago"
+            elif time_diff.seconds > 3600:
+                time_str = f"{time_diff.seconds // 3600} hours ago"
+            else:
+                time_str = f"{time_diff.seconds // 60} minutes ago"
+            
+            table.add_row(
+                item['type'],
+                item['description'][:50] + "..." if len(item['description']) > 50 else item['description'],
+                time_str
+            )
+        
+        console.print(table)
+    else:
+        console.print("No recent activity found")
+
+@memory.command()
+@click.argument('search_term')
+@click.option('--days', default=30, help='Days back to search (deafault: 30)')
+def search(search_term, days):
+    """Search through project memory"""
+    memory_manager = MemoryManager()
+    project = memory_manager.get_current_project()
+
+    if not project:
+        console.print("🔴 No active project found. Run 'ridge memory init [project_name]' first")
+        return
+
+    console.print(f"🔍 Searching for '[bold]{search_term}[/bold]' in {project.name}")
+
+    results = memory_manager.search_memory(search_term, days)
+
+    if results:
+        table = Table(title=f"Search Results ({len(results)} found)")
+        table.add_column("Type", style="cyan")
+        table.add_column("Content",style="magenta")
+        table.add_column("Time", style="green")
+
+        for result in results:
+            # Calculate relative time
+            time_diff = datetime.utcnow() - result['timestamp']
+            if time_diff.days > 0:
+                time_str = f"{time_diff.days} days ago"
+            elif time_diff.seconds > 3600:
+                time_str = f"{time_diff.seconds // 3600} hours ago"
+            else:
+                time_str = f"{time_diff.seconds // 60} minutes ago"
+            
+            table.add_row(
+                result['type'].title(),
+                result['content'][:80] + "..." if len(result['content']) > 80 else result['content'],
+                time_str
+            )
+
+        console.print(table)
+    else:
+        console.print(f"No results found for '{search_term}' in the last {days} days")
+
+@memory.command()
+@click.argument('decision_text')
+@click.option('--category',default='general', help='Decision category (e.g., tech_choice, design)')
+@click.option('--reasoning', help='Why this decision was made')
+def decision(decision_text, category, reasoning):
+    """Log an important project decision"""
+    memory_manager = MemoryManager()
+    project = memory_manager.get_current_project()
+
+    if not project:
+        console.print("🔴 No active project found, Run 'ridge memory init '[project_name]' first")
+        return
+    
+    decision_obj = memory_manager.log_decision(decision_text, category, reasoning)
+
+    if decision_obj:
+        console.print(f"🟢 Decision logged: [bold]{decision_text}[/bold]")
+        console.print(f"📁 Category: {category}")
+        if reasoning:
+            console.print(f"💭 Reasoning: {reasoning}")
+    else:
+        console.print("🔴 failed to log decision")
 
 
 if __name__ == '__main__':
