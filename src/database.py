@@ -62,3 +62,38 @@ if __name__ == '__main__':
         print("\n🟢 All database connections working!")
     else:
         print("\n🔴 Some connections failed")
+
+# Add this to the END of your existing src/database.py file:
+
+class Database:
+    """Database connection manager for Ridge Base"""
+    
+    def __init__(self):
+        self.engine = None
+        self.SessionLocal = None
+        self._setup_engine()
+    
+    def _setup_engine(self):
+        """Setup SQLAlchemy engine and session maker"""
+        conn_string = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
+        self.engine = create_engine(conn_string)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+    
+    def get_session(self):
+        """Get a new database session"""
+        return self.SessionLocal()
+    
+    def close_session(self, session):
+        """Close a database session"""
+        session.close()
+    
+    def test_connection(self):
+        """Test database connection"""
+        try:
+            session = self.get_session()
+            session.execute(text("SELECT 1"))
+            session.close()
+            return True
+        except Exception as e:
+            print(f"Database connection failed: {e}")
+            return False

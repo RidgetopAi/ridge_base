@@ -1,102 +1,92 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
+# src/models.py - Updated Database Models
+
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
-import os
+from sqlalchemy.orm import relationship
+from datetime import datetime, timezone
 
 Base = declarative_base()
 
 class Project(Base):
-    """Project tracking table"""
     __tablename__ = 'projects'
-
-    project_id = Column(Integer, primary_key=True)
+    
+    id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False, unique=True)
-    path = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_active = Column(DateTime, default=datetime.utcnow)
+    path = Column(String(1024), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_active = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     status = Column(String(50), default='active')
-
+    
     # Relationships
     conversations = relationship("Conversation", back_populates="project")
     decisions = relationship("Decision", back_populates="project")
     files_tracked = relationship("FileTracked", back_populates="project")
     checkpoints = relationship("Checkpoint", back_populates="project")
+    
+    def __repr__(self):
+        return f"<Project(name='{self.name}', path='{self.path}')>"
 
 class Conversation(Base):
-    """Conversation history table"""
     __tablename__ = 'conversations'
-
+    
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey('projects.project_id'))
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    command = Column(Text, nullable=False)
-    context_snapshot = Column(Text) #JSON blob
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    command = Column(String(1024))
+    context_snapshot = Column(Text)
     response = Column(Text)
-
+    archived = Column(Boolean, default=False)  # For context management
+    
     # Relationships
     project = relationship("Project", back_populates="conversations")
+    
+    def __repr__(self):
+        return f"<Conversation(id={self.id}, project_id={self.project_id}, command='{self.command}')>"
 
 class Decision(Base):
-    """Important decisions tracking"""
     __tablename__ = 'decisions'
     
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey('projects.project_id'))
-    category = Column(String(100))  # tech_choice, design_decision, etc.
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False)
+    category = Column(String(100))
     decision = Column(Text, nullable=False)
     reasoning = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     project = relationship("Project", back_populates="decisions")
+    
+    def __repr__(self):
+        return f"<Decision(id={self.id}, category='{self.category}', decision='{self.decision[:50]}...')>"
 
 class FileTracked(Base):
-    """File tracking for change detection"""
     __tablename__ = 'files_tracked'
     
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey('projects.project_id'))
-    path = Column(Text, nullable=False)
-    hash = Column(String(32))  # MD5 hash
-    last_analyzed = Column(DateTime, default=datetime.utcnow)
-    insights = Column(Text)  # JSON blob of analysis
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False)
+    path = Column(String(1024), nullable=False)
+    hash = Column(String(64))  # SHA-256 hash
+    last_analyzed = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    insights = Column(Text)  # Cached analysis results
     
     # Relationships
     project = relationship("Project", back_populates="files_tracked")
+    
+    def __repr__(self):
+        return f"<FileTracked(id={self.id}, path='{self.path}', hash='{self.hash[:8]}...')>"
 
 class Checkpoint(Base):
-    """Context checkpoints for memory management"""
     __tablename__ = 'checkpoints'
     
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey('projects.project_id'))
-    message_id = Column(Integer)  # Reference to conversation
-    description = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False)
+    message_id = Column(Integer)  # Reference to conversation ID
+    description = Column(String(255), nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    auto_created = Column(Boolean, default=False)  # Distinguish auto vs manual checkpoints
     
     # Relationships
     project = relationship("Project", back_populates="checkpoints")
-
-class DatabaseManager:
-    """Manages database connections and operations"""
     
-    def __init__(self, db_url=None):
-        if db_url is None:
-            # Default connection from our docker setup
-            db_url = "postgresql://ridge_user:ridge_pass@localhost:5433/ridge_base"
-        
-        self.engine = create_engine(db_url)
-        self.SessionLocal = sessionmaker(bind=self.engine)
-        
-        # Create tables if they don't exist
-        Base.metadata.create_all(bind=self.engine)
-        print("✅ Database models initialized")
-
-    def get_session(self):
-        """Get database session"""
-        return self.SessionLocal()
-
-    def close_session(self, session):
-        """Close database session"""
-        session.close()
+    def __repr__(self):
+        return f"<Checkpoint(id={self.id}, description='{self.description}', auto_created={self.auto_created})>"

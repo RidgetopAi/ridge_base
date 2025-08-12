@@ -1,87 +1,157 @@
-import click
+# src/cli.py - Updated CLI with Context Management Integration
+
 import os
 import sys
-from models import DatabaseManager
-from rich.console import Console
-from rich.table import Table
-from memory import MemoryManager
+import click
 from datetime import datetime
+from rich.console import Console
 
-# Initialize rich console for beautiful output
+# Add the src directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from agents import AgentManager
+from api import RidgeAPI
+from memory import MemoryManager
+from context import ContextManager
+from file_tracker import FileTracker
+from utils import get_file_hash
+from models import Project
+
 console = Console()
-
-# Add src directory to path so we can import our modules
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from utils import file_exists, folder_exists, read_file_content, scan_folder
-
-# Valid targets and actions from design
-VALID_TARGETS = ['file', 'folder', 'project','memory', 'context', 'session']
-VALID_ACTIONS = ['edit', 'create', 'analyze', 'debug', 'status', 'health', 'explain']
-
-def validate_command(target, action):
-    """Enhanced validation with file existence checks"""
-    if action not in VALID_ACTIONS:
-        raise click.BadParameter(f"Invalid action '{action}'. Valid actions: {', '.join(VALID_ACTIONS)}")
-    
-    # Check if target is a special command or file/folder
-    if target not in VALID_TARGETS:
-        # Assume it a file or folder path - check existence
-        if not file_exists(target) and not folder_exists(target):
-            click.echo(f"Warning: {target} does not exist")
-
-    return True
-
 
 @click.group()
 def cli():
-    """Ridge Base CLI - AI Development Partner"""
+    """Ridge Base CLI - AI-powered development assistant with memory"""
     pass
-
-# Mode flags - control HOW the AI thinks
-@click.option('--deep', is_flag=True, help='Web search + reasoning')
-@click.option('--ultra', is_flag=True, help='Maximum reasoning power')
-@click.option('--debug', is_flag=True, help='Debug agent mode')
-@click.option('--code', is_flag=True, help='Pure coding focus')
-@click.option('--explain', is_flag=True, help='Teaching Mode')
-@click.option('--quick', is_flag=True, help='Fast responses')
-@click.option('--manager', is_flag=True, help='Project management mode')
-
-# Behavior flags - control WHAT the AI does
-@click.option('--watch', is_flag=True, help='Monitor file changes')
-@click.option('--interactive', is_flag=True, help='Back-and-forth conversation')
-@click.option('--batch', is_flag=True, help='Process multiple targets')
-@click.option('--dry-run', is_flag=True, help='show what would happen')
-@click.option('--allow-all', is_flag=True, help='skip approval prompts')
 
 @cli.command()
 @click.argument('target')
 @click.argument('action')
-
-def main(target, action,deep, ultra, debug, code, explain, quick, manager, watch, interactive, batch, dry_run, allow_all):
-    """Main Command: ridge [target] [action]"""
-
-    # Validate input
-    validate_command(target, action)
+@click.option('--debug', is_flag=True, help='Use debug agent for methodical troubleshooting')
+@click.option('--explain', is_flag=True, help='Use professor agent for teaching mode')
+@click.option('--manager', is_flag=True, help='Use manager agent for project management')
+@click.option('--code', is_flag=True, help='Use code agent for pure coding focus')
+@click.option('--deep', is_flag=True, help='Enable web search and deep reasoning')
+@click.option('--ultra', is_flag=True, help='Use maximum reasoning (with --deep)')
+@click.option('--quick', is_flag=True, help='Use fast responses')
+@click.option('--interactive', is_flag=True, help='Enable back-and-forth conversation')
+@click.option('--batch', is_flag=True, help='Process multiple targets')
+@click.option('--watch', is_flag=True, help='Monitor file changes')
+@click.option('--dry-run', is_flag=True, help='Show what would happen without executing')
+@click.option('--allow-all', is_flag=True, help='Skip approval prompts')
+def main(target, action, **flags):
+    """Main command: ridge [target] [action] --[flags]"""
     
-    # Collect active flags for processing
-    mode_flags = {
-        'deep': deep, 'ultra': ultra, 'debug': debug, 'code': code, 'explain': explain, 'quick': quick, 'manager': manager
-    }
+    # Initialize managers
+    agent_manager = AgentManager()
+    api = RidgeAPI()
+    memory_manager = MemoryManager()
+    file_tracker = FileTracker()
+    
+    # Log the command for memory
+    command_str = f"ridge {target} {action}"
+    flag_str = " ".join([f"--{k}" for k, v in flags.items() if v])
+    if flag_str:
+        command_str += f" {flag_str}"
+    
+    try:
+        # Select agent based on flags
+        mode_flags = {k: v for k, v in flags.items() if k in ['debug', 'explain', 'manager', 'code']}
+        agent = agent_manager.select_agent_from_flags(mode_flags)
+        
+        # Build context from memory
+        context = {}
+        if memory_manager.current_project:
+            context = memory_manager.get_context_for_ai()
+            
+            # Check for file changes if working with files
+            if os.path.isfile(target):
+                # Update file tracking
+                rel_path = os.path.relpath(target, memory_manager.current_project.path)
+                file_tracker.update_file_tracking(memory_manager.current_project, rel_path)
+        
+        # Prepare message for AI
+        message = f"""
+Target: {target}
+Action: {action}
+Context: {context if context else 'No previous context'}
 
-    behavior_flags = {
-        'watch': watch, 'interactive': interactive, 'batch': batch, 'dry_run': dry_run, 'allow_all': allow_all
-    }
+Please {action} the {target} according to my request.
+        """.strip()
+        
+        # Get response from AI
+        response = api.chat_with_agent(agent, message, flags)
+        
+        console.print("\n[bold]Response:[/bold]")
+        console.print(response)
+        
+        # Log conversation to memory
+        if memory_manager.current_project:
+            memory_manager.log_conversation(
+                command=command_str,
+                context_snapshot=str(context),
+                response=response
+            )
+        
+        # Handle file watching if requested
+        if flags.get('watch'):
+            console.print("\n[dim]Watching for file changes... (Press Ctrl+C to stop)[/dim]")
+            _watch_files(target, agent, api, memory_manager, file_tracker, flags)
+            
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        if memory_manager.current_project:
+            memory_manager.log_conversation(
+                command=command_str,
+                response=f"Error: {e}"
+            )
 
-    # Filter to only active flags
-    active_modes = [flag for flag, active in mode_flags.items() if active]
-    active_behaviors = [flag for flag, active in behavior_flags.items() if active]
+def _watch_files(target, agent, api, memory_manager, file_tracker, flags):
+    """Watch for file changes and respond automatically"""
+    import time
+    
+    if not memory_manager.current_project:
+        console.print("[red]Cannot watch files without an active project[/red]")
+        return
+    
+    last_check = datetime.now()
+    
+    try:
+        while True:
+            time.sleep(2)  # Check every 2 seconds
+            
+            # Get changed files
+            changed_files = file_tracker.get_changed_files(memory_manager.current_project)
+            
+            if changed_files:
+                console.print(f"\n[yellow]Detected {len(changed_files)} file changes[/yellow]")
+                file_tracker.display_file_changes(memory_manager.current_project)
+                
+                # Auto-respond to changes
+                change_summary = ", ".join([f"{f['path']} ({f['status']})" for f in changed_files])
+                message = f"Files changed: {change_summary}. Please review and provide insights."
+                
+                response = api.chat_with_agent(agent, message, flags)
+                console.print(f"\n[bold]Auto-response:[/bold]\n{response}")
+                
+                # Log to memory
+                memory_manager.log_conversation(
+                    command=f"auto-watch: {change_summary}",
+                    response=response
+                )
+                
+                # Update file tracking
+                for file_info in changed_files:
+                    if file_info['status'] != 'deleted':
+                        file_tracker.update_file_tracking(
+                            memory_manager.current_project, 
+                            file_info['path']
+                        )
+            
+    except KeyboardInterrupt:
+        console.print("\n[dim]File watching stopped[/dim]")
 
-    click.echo(f"Target: {target}")
-    click.echo(f"Action: {action}")
-    click.echo(f"Mode flags: {active_modes}")
-    click.echo(f"Behavior flags: {active_behaviors}")
-
+# Memory commands group
 @cli.group()
 def memory():
     """Memory management commands"""
@@ -89,126 +159,163 @@ def memory():
 
 @memory.command()
 @click.argument('project_name')
-def init(project_name):
-    """Initialize memory for a new project"""
-    console.print(f"🧠 Initializing memory for project: [bold]{project_name}[/bold]")
-    
+@click.option('--path', help='Project path (defaults to current directory)')
+def init(project_name, path):
+    """Initialize project memory tracking"""
     memory_manager = MemoryManager()
-    project_data, is_new = memory_manager.init_project(project_name)
-
-    if is_new:
-        console.print(f"✅ New project '[bold]{project_name}[/bold]' created and activated")
-    else:
-        console.print(f"✅ Existing project '[bold]{project_name}[/bold]' reactivated")
+    file_tracker = FileTracker()
     
-    console.print(f"📁 Project path: {project_data['path']}")
+    project_path = path or os.getcwd()
+    
+    if memory_manager.init_project(project_name, project_path):
+        # Sync initial files  
+        console.print("[dim]Scanning project files...[/dim]")
+        
+        # Get fresh project object
+        session = memory_manager.db.get_session()
+    try:
+        project = session.query(Project).filter_by(name=project_name).first()
+        stats = file_tracker.sync_project_files(project)
+        console.print(f"[green]✓[/green] Tracking {stats.get('new', 0)} files")
+    finally:
+        memory_manager.db.close_session(session)
 
 @memory.command()
 def status():
-    """Show current project memory status"""
+    """Show recent project activity"""
     memory_manager = MemoryManager()
-    project = memory_manager.get_current_project()
-    
-    if not project:
-        console.print("❌ No active project found. Run 'ridge memory init [project_name]' first")
-        return
-    
-    console.print(f"📊 Memory Status for [bold]{project.name}[/bold]")
-    
-    # Get recent activity
-    activity = memory_manager.get_recent_activity()
-    
-    if activity:
-        table = Table(title="Recent Activity (Last 7 Days)")
-        table.add_column("Type", style="cyan")
-        table.add_column("Description", style="magenta")
-        table.add_column("Time", style="green")
-        
-        for item in activity[:10]:  # Show last 10 items
-            # Calculate relative time
-            time_diff = datetime.utcnow() - item['timestamp']
-            if time_diff.days > 0:
-                time_str = f"{time_diff.days} days ago"
-            elif time_diff.seconds > 3600:
-                time_str = f"{time_diff.seconds // 3600} hours ago"
-            else:
-                time_str = f"{time_diff.seconds // 60} minutes ago"
-            
-            table.add_row(
-                item['type'],
-                item['description'][:50] + "..." if len(item['description']) > 50 else item['description'],
-                time_str
-            )
-        
-        console.print(table)
-    else:
-        console.print("No recent activity found")
+    memory_manager.get_recent_activity()
 
 @memory.command()
 @click.argument('search_term')
-@click.option('--days', default=30, help='Days back to search (deafault: 30)')
-def search(search_term, days):
-    """Search through project memory"""
+def search(search_term):
+    """Search conversations and decisions"""
     memory_manager = MemoryManager()
-    project = memory_manager.get_current_project()
-
-    if not project:
-        console.print("🔴 No active project found. Run 'ridge memory init [project_name]' first")
-        return
-
-    console.print(f"🔍 Searching for '[bold]{search_term}[/bold]' in {project.name}")
-
-    results = memory_manager.search_memory(search_term, days)
-
-    if results:
-        table = Table(title=f"Search Results ({len(results)} found)")
-        table.add_column("Type", style="cyan")
-        table.add_column("Content",style="magenta")
-        table.add_column("Time", style="green")
-
-        for result in results:
-            # Calculate relative time
-            time_diff = datetime.utcnow() - result['timestamp']
-            if time_diff.days > 0:
-                time_str = f"{time_diff.days} days ago"
-            elif time_diff.seconds > 3600:
-                time_str = f"{time_diff.seconds // 3600} hours ago"
-            else:
-                time_str = f"{time_diff.seconds // 60} minutes ago"
-            
-            table.add_row(
-                result['type'].title(),
-                result['content'][:80] + "..." if len(result['content']) > 80 else result['content'],
-                time_str
-            )
-
-        console.print(table)
-    else:
-        console.print(f"No results found for '{search_term}' in the last {days} days")
+    memory_manager.search_memory(search_term)
 
 @memory.command()
 @click.argument('decision_text')
-@click.option('--category',default='general', help='Decision category (e.g., tech_choice, design)')
-@click.option('--reasoning', help='Why this decision was made')
+@click.option('--category', default='general', help='Decision category')
+@click.option('--reasoning', help='Reasoning behind the decision')
 def decision(decision_text, category, reasoning):
     """Log an important project decision"""
     memory_manager = MemoryManager()
-    project = memory_manager.get_current_project()
+    memory_manager.log_decision(decision_text, category, reasoning)
 
-    if not project:
-        console.print("🔴 No active project found, Run 'ridge memory init '[project_name]' first")
-        return
+# Context commands group
+@cli.group()
+def context():
+    """Context management commands"""
+    pass
+
+@context.command()
+def status():
+    """Show context usage and checkpoint information"""
+    memory_manager = MemoryManager()
+    context_manager = ContextManager()
     
-    decision_obj = memory_manager.log_decision(decision_text, category, reasoning)
-
-    if decision_obj:
-        console.print(f"🟢 Decision logged: [bold]{decision_text}[/bold]")
-        console.print(f"📁 Category: {category}")
-        if reasoning:
-            console.print(f"💭 Reasoning: {reasoning}")
+    if memory_manager.current_project:
+        context_manager.set_current_project(memory_manager.current_project)
+        context_manager.show_context_status()
     else:
-        console.print("🔴 failed to log decision")
+        console.print("[red]No active project. Use 'ridge memory init [project]' first.[/red]")
 
+@context.command()
+@click.argument('description')
+def checkpoint(description):
+    """Create a manual checkpoint with description"""
+    memory_manager = MemoryManager()
+    context_manager = ContextManager()
+    
+    if memory_manager.current_project:
+        context_manager.set_current_project(memory_manager.current_project)
+        context_manager.create_checkpoint(description)
+    else:
+        console.print("[red]No active project. Use 'ridge memory init [project]' first.[/red]")
+
+@context.command('reset-to')
+@click.argument('checkpoint_identifier')
+def reset_to(checkpoint_identifier):
+    """Reset context to a specific checkpoint (use 'latest' for most recent)"""
+    memory_manager = MemoryManager()
+    context_manager = ContextManager()
+    
+    if memory_manager.current_project:
+        context_manager.set_current_project(memory_manager.current_project)
+        context_manager.reset_to_checkpoint(checkpoint_identifier)
+    else:
+        console.print("[red]No active project. Use 'ridge memory init [project]' first.[/red]")
+
+# File tracking commands group
+@cli.group()
+def files():
+    """File tracking and change detection commands"""
+    pass
+
+@files.command()
+def sync():
+    """Synchronize project files with tracking database"""
+    memory_manager = MemoryManager()
+    file_tracker = FileTracker()
+    
+    if memory_manager.current_project:
+        console.print("[dim]Synchronizing project files...[/dim]")
+        stats = file_tracker.sync_project_files(memory_manager.current_project)
+        
+        if 'error' not in stats:
+            console.print(f"[green]✓[/green] Sync complete:")
+            console.print(f"  New: {stats['new']}")
+            console.print(f"  Updated: {stats['updated']}")
+            console.print(f"  Unchanged: {stats['unchanged']}")
+            console.print(f"  Deleted: {stats['deleted']}")
+    else:
+        console.print("[red]No active project. Use 'ridge memory init [project]' first.[/red]")
+
+@files.command()
+def changes():
+    """Show recent file changes"""
+    memory_manager = MemoryManager()
+    file_tracker = FileTracker()
+    
+    if memory_manager.current_project:
+        file_tracker.display_file_changes(memory_manager.current_project)
+    else:
+        console.print("[red]No active project. Use 'ridge memory init [project]' first.[/red]")
+
+# Health check commands
+@cli.command()
+def health():
+    """Check system health and connections"""
+    from database import Database
+    
+    console.print("[bold]Ridge Base System Health Check[/bold]\n")
+    
+    # Test database connection
+    try:
+        db = Database()
+        session = db.get_session()
+        db.close_session(session)
+        console.print("[green]✓[/green] PostgreSQL connection: OK")
+    except Exception as e:
+        console.print(f"[red]✗[/red] PostgreSQL connection: FAILED - {e}")
+    
+    # Test Redis connection (if implemented)
+    console.print("[yellow]○[/yellow] Redis caching: Not implemented yet")
+    
+    # Check agent files
+    try:
+        agent_manager = AgentManager()
+        agent_count = len(agent_manager.agents)
+        console.print(f"[green]✓[/green] Agent system: {agent_count} agents loaded")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Agent system: FAILED - {e}")
+    
+    # Check API
+    try:
+        api = RidgeAPI()
+        console.print("[green]✓[/green] API wrapper: Ready")
+    except Exception as e:
+        console.print(f"[red]✗[/red] API wrapper: FAILED - {e}")
 
 if __name__ == '__main__':
     cli()
