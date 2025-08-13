@@ -6,9 +6,7 @@ import click
 from datetime import datetime
 from rich.console import Console
 
-# Add the src directory to Python path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+#local imports
 from agents import AgentManager
 from api import RidgeAPI
 from memory import MemoryManager
@@ -16,7 +14,10 @@ from context import ContextManager
 from file_tracker import FileTracker
 from utils import get_file_hash
 from models import Project
+from utils import read_file_content
 
+# Add the src directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 console = Console()
 
 @click.group()
@@ -39,72 +40,126 @@ def cli():
 @click.option('--watch', is_flag=True, help='Monitor file changes')
 @click.option('--dry-run', is_flag=True, help='Show what would happen without executing')
 @click.option('--allow-all', is_flag=True, help='Skip approval prompts')
-def main(target, action, **flags):
+def main(target, action, debug, explain, manager,code, deep, ultra, quick, interactive, batch, watch, dry_run, allow_all):
     """Main command: ridge [target] [action] --[flags]"""
     
-    # Initialize managers
-    agent_manager = AgentManager()
-    api = RidgeAPI()
-    memory_manager = MemoryManager()
-    file_tracker = FileTracker()
+    # Only handle 'analyze' action for now
+    if action != 'analyze':
+        click.echo(f"Action '{action}' not implemented yet. Currently supports: analyze")
+        return
     
-    # Log the command for memory
-    command_str = f"ridge {target} {action}"
-    flag_str = " ".join([f"--{k}" for k, v in flags.items() if v])
-    if flag_str:
-        command_str += f" {flag_str}"
-    
+    # Collect mode flags
+    mode_flags = {
+        'debug': debug,
+        'explain': explain,
+        'code': code,
+        'manager': manager,
+        'deep': deep,
+        'ultra': ultra,
+        'quick': quick
+    }
+
+    # Collect behavior flags
+    behavior_flags = {
+        'interactive': interactive,
+        'batch': batch,
+        'watch': watch,
+        'dry_run': dry_run,
+        'allow_all': allow_all
+    }
+
     try:
+        # Initialize systems
+        #from agents import AgentManager
+        #from api import RidgeAPI
+        #from memory import MemoryManager
+        #from utils import read_file_content
+
+        agent_manager = AgentManager() 
+        api = RidgeAPI()
+        memory_manager = MemoryManager()
+
+        # Ensure we have an active project
+        if not memory_manager.current_project:
+            click.echo("No active project found. Please run 'ridge memory init [project-name]' first.")
+            return
+        
+        # Check if target exists
+        if not os.path.exists(target):
+            click.echo(f"Error: Target '[target]' does not exist.")
+            return
+        
+        # Read file content
+        file_content = read_file_content(target)
+        if not file_content:
+            click.echo(f"Error: Could not read '{target}' or file is empty.")
+            return
+        
         # Select agent based on flags
-        mode_flags = {k: v for k, v in flags.items() if k in ['debug', 'explain', 'manager', 'code']}
         agent = agent_manager.select_agent_from_flags(mode_flags)
         
-        # Build context from memory
-        context = {}
-        if memory_manager.current_project:
-            context = memory_manager.get_context_for_ai()
-            
-            # Check for file changes if working with files
-            if os.path.isfile(target):
-                # Update file tracking
-                rel_path = os.path.relpath(target, memory_manager.current_project.path)
-                file_tracker.update_file_tracking(memory_manager.current_project, rel_path)
-        
-        # Prepare message for AI
-        message = f"""
-Target: {target}
-Action: {action}
-Context: {context if context else 'No previous context'}
+        # Build the analysis prompt
+        prompt = f"""Please analyze this file: {target}
 
-Please {action} the {target} according to my request.
-        """.strip()
-        
-        # Get response from AI
-        response = api.chat_with_agent(agent, message, flags)
-        
-        console.print("\n[bold]Response:[/bold]")
-        console.print(response)
-        
-        # Log conversation to memory
-        if memory_manager.current_project:
-            memory_manager.log_conversation(
-                command=command_str,
-                context_snapshot=str(context),
-                response=response
-            )
-        
-        # Handle file watching if requested
-        if flags.get('watch'):
-            console.print("\n[dim]Watching for file changes... (Press Ctrl+C to stop)[/dim]")
-            _watch_files(target, agent, api, memory_manager, file_tracker, flags)
-            
+File content:
+{file_content}
+
+Please provide insights about:
+- Code structure and quality
+- Potential issues or improvements
+- Best practices recommendations
+- Any concerns or suggestions
+
+File path: {target}
+"""
+           
+
+        if dry_run:
+            click.echo(f"\n[DRY RUN] Would analyze {target} with {agent.name} agent")
+
+            click.echo(f"Prompt preview: {prompt[:200]}...")
+            return
+
+        # Show what we're doing
+        click.echo(f"\n🔍 Analyzing {target} with {agent.name} agent...")
+
+        # Get AI response
+        response = api.chat_with_agent(agent, prompt, mode_flags)
+
+        # Display response with Rich formatting
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console()
+
+        # Create a panel with the analysis
+        panel = Panel(
+            response,
+            title=f"analysis of {target}",
+            title_align="left",
+            border_style="blue",
+            padding=(1, 2)
+        )  
+        console.print(panel)
+
+        # Log the conversation to memory
+        command = f"ridge {target} analyze"
+        if any(mode_flags.values()):
+            active_flags = [k for k, v in mode_flags.items() if v]
+            command += f" --{'--'.join(active_flags)}"
+
+        memory_manager.log_conversation(
+            command=command,
+            context_snapshot=f"Analyzed {target} with {agent.name} agent",
+            response=response[:500] + "..." if len(response) > 500 else response
+        )
+
+        click.echo(f"\n✔️ Analysis complete and logged to project memory")
+    
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        if memory_manager.current_project:
-            memory_manager.log_conversation(
-                command=command_str,
-                response=f"Error: {e}"
-            )
+        click.echo(f"Error during analysis: {str(e)}")
+        console.print_exception()
+
 
 def _watch_files(target, agent, api, memory_manager, file_tracker, flags):
     """Watch for file changes and respond automatically"""
