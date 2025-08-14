@@ -4,3 +4,15 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .coverage
+
+# Local docs not for GitHub
+/docs/
+
+# Backups
+.ridge_backups/
+
+# Windows ADS sidecar files
+*.Zone.Identifier
+
+docker-compose.yml
+.env
