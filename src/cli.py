@@ -5,6 +5,11 @@ import sys
 import click
 from datetime import datetime
 from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+import re
+import difflib
 
 #local imports
 from agents import AgentManager
@@ -19,6 +24,84 @@ from utils import read_file_content
 # Add the src directory to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 console = Console()
+
+# Helpers used by edit workflow
+
+def extract_code_from_response(response: str, original_content: str) -> str:
+    """
+    Extract the best candidate for full file content from an AI response.
+    - Prefer the largest fenced code block.
+    - If none found, fall back to response if it looks like code (multi-line).
+    - Otherwise, return the original content.
+    """
+    blocks = re.findall(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", response, re.DOTALL)
+    if blocks:
+        candidate = max(blocks, key=lambda b: len(b.strip())).strip()
+        return candidate if candidate else original_content
+    text = response.strip()
+    if "\n" in text and len(text) > 20:
+        return text
+    return original_content
+
+
+def show_diff(old_text: str, new_text: str, filename: str) -> None:
+    """Render a unified diff between old and new content for a file."""
+    diff_lines = list(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=False),
+            new_text.splitlines(keepends=False),
+            fromfile=f"{filename} (old)",
+            tofile=f"{filename} (new)",
+            lineterm=""
+        )
+    )
+    if not diff_lines:
+        console.print("[green]No differences found[/green]")
+        return
+    diff_str = "\n".join(diff_lines)
+    console.print(Panel.fit(f"[cyan]Proposed changes for[/cyan] [bold]{filename}[/bold]", border_style="blue"))
+    console.print(Syntax(diff_str, "diff", theme="ansi_light", line_numbers=False))
+
+def show_diff_side_by_side(old_text: str, new_text: str, filename: str) -> None:
+    """Render a side-by-side diff between old and new content."""
+    left = old_text.splitlines(keepends=False)
+    right = new_text.splitlines(keepends=False)
+    sm = difflib.SequenceMatcher(None, left, right)
+
+    table = Table(show_header=True, header_style="bold", show_lines=False, box=None)
+    table.add_column("L#", width=5, style="dim")
+    table.add_column(f"{filename} (old)", overflow="fold")
+    table.add_column("R#", width=5, style="dim")
+    table.add_column(f"{filename} (new)", overflow="fold")
+
+    i_ln = j_ln = 1
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            for k in range(i2 - i1):
+                table.add_row(str(i_ln), left[i1 + k], str(j_ln), right[j1 + k])
+                i_ln += 1
+                j_ln += 1
+        elif tag == 'delete':
+            for k in range(i2 - i1):
+                table.add_row(f"[red]{i_ln}[/red]", f"[red]- {left[i1 + k]}[/red]", "", "")
+                i_ln += 1
+        elif tag == 'insert':
+            for k in range(j2 - j1):
+                table.add_row("", "", f"[green]{j_ln}[/green]", f"[green]+ {right[j1 + k]}[/green]")
+                j_ln += 1
+        elif tag == 'replace':
+            span = max(i2 - i1, j2 - j1)
+            for k in range(span):
+                ltxt = left[i1 + k] if i1 + k < i2 else ""
+                rtxt = right[j1 + k] if j1 + k < j2 else ""
+                ln_l = str(i_ln) if i1 + k < i2 else ""
+                ln_r = str(j_ln) if j1 + k < j2 else ""
+                table.add_row(f"[yellow]{ln_l}[/yellow]", f"[yellow]~ {ltxt}[/yellow]", f"[yellow]{ln_r}[/yellow]", f"[yellow]~ {rtxt}[/yellow]")
+                if i1 + k < i2: i_ln += 1
+                if j1 + k < j2: j_ln += 1
+
+    console.print(Panel.fit(f"[cyan]Proposed changes for[/cyan] [bold]{filename}[/bold] (side-by-side)", border_style="blue"))
+    console.print(table)
 
 @click.group()
 def cli():
@@ -43,9 +126,9 @@ def cli():
 def main(target, action, debug, explain, manager,code, deep, ultra, quick, interactive, batch, watch, dry_run, allow_all):
     """Main command: ridge [target] [action] --[flags]"""
     
-    # Only handle 'analyze' action for now
-    if action != 'analyze':
-        click.echo(f"Action '{action}' not implemented yet. Currently supports: analyze")
+    # handle analyze and edit actions
+    if action not in ['analyze', 'edit']:
+        click.echo(f"Action '{action}' not implemented yet. Currently supports: analyze, edit")
         return
     
     # Collect mode flags
@@ -70,11 +153,6 @@ def main(target, action, debug, explain, manager,code, deep, ultra, quick, inter
 
     try:
         # Initialize systems
-        #from agents import AgentManager
-        #from api import RidgeAPI
-        #from memory import MemoryManager
-        #from utils import read_file_content
-
         agent_manager = AgentManager() 
         api = RidgeAPI()
         memory_manager = MemoryManager()
@@ -86,20 +164,21 @@ def main(target, action, debug, explain, manager,code, deep, ultra, quick, inter
         
         # Check if target exists
         if not os.path.exists(target):
-            click.echo(f"Error: Target '[target]' does not exist.")
+            click.echo(f"Error: Target '{target}' does not exist.")
             return
         
-        # Read file content
-        file_content = read_file_content(target)
-        if not file_content:
-            click.echo(f"Error: Could not read '{target}' or file is empty.")
-            return
+        if action == 'analyze':
+            # Read file content
+            file_content = read_file_content(target)
+            if not file_content:
+                click.echo(f"Error: Could not read '{target}' or file is empty.")
+                return
         
-        # Select agent based on flags
-        agent = agent_manager.select_agent_from_flags(mode_flags)
-        
-        # Build the analysis prompt
-        prompt = f"""Please analyze this file: {target}
+            # Select agent based on flags
+            agent = agent_manager.select_agent_from_flags(mode_flags)
+            
+            # Build the analysis prompt
+            prompt = f"""Please analyze this file: {target}
 
 File content:
 {file_content}
@@ -114,52 +193,126 @@ File path: {target}
 """
            
 
-        if dry_run:
-            click.echo(f"\n[DRY RUN] Would analyze {target} with {agent.name} agent")
+            if dry_run:
+                click.echo(f"\n[DRY RUN] Would analyze {target} with {agent.name} agent")
 
-            click.echo(f"Prompt preview: {prompt[:200]}...")
+                click.echo(f"Prompt preview: {prompt[:200]}...")
+                return
+
+            # Show what we're doing
+            click.echo(f"\n🔍 Analyzing {target} with {agent.name} agent...")
+
+            # Get AI response
+            response = api.chat_with_agent(agent, prompt, mode_flags)
+
+            # Display response with Rich formatting
+            from rich.panel import Panel
+
+            # Create a panel with the analysis
+            panel = Panel(
+                response,
+                title=f"analysis of {target}",
+                title_align="left",
+                border_style="blue",
+                padding=(1, 2)
+            )  
+            console.print(panel)
+
+            # Log the conversation to memory
+            command = f"ridge {target} analyze"
+            if any(mode_flags.values()):
+                active_flags = [k for k, v in mode_flags.items() if v]
+                command += f" --{'--'.join(active_flags)}"
+
+            memory_manager.log_conversation(
+                command=command,
+                context_snapshot=f"Analyzed {target} with {agent.name} agent",
+                response=response[:500] + "..." if len(response) > 500 else response
+            )
+
+            click.echo(f"\n✔️ Analysis complete and logged to project memory")
+        
+        elif action == 'edit':
+            from backup_manager import BackupManager
+            from rich.prompt import Confirm
+            from rich.syntax import Syntax
+            import difflib
+        
+        # Read current file content
+        file_content = read_file_content(target)
+        if file_content is None:
+            console.print(f"[red]Error: Could not read file {target}[/red]")
             return
+        
+        # Select agent for editing
+        agent = agent_manager.select_agent_from_flags(mode_flags)
+        
+        # Create backup before editing
+        backup_manager = BackupManager()
+        try:
+            backup_path = backup_manager.create_backups(target)
+            console.print(f"[green]✅ Backup created:[/green] {backup_path}")
+        except Exception as e:
+            console.print(f"[red]❌ Backup failed:[/red] {e}")
+            return
+        
+        # Build edit prompt for AI
+        prompt = f"""Please suggest improvements for this file. Focus on:
+- Code quality and best practices
+- Performance optimizations  
+- Security improvements
+- Better error handling
+- Documentation improvements
 
-        # Show what we're doing
-        click.echo(f"\n🔍 Analyzing {target} with {agent.name} agent...")
+Current file content:
+{file_content}
 
-        # Get AI response
-        response = api.chat_with_agent(agent, prompt, mode_flags)
+Please provide the complete improved version of the file, maintaining the same functionality but with your recommended improvements."""
 
-        # Display response with Rich formatting
-        from rich.console import Console
-        from rich.panel import Panel
-
-        console = Console()
-
-        # Create a panel with the analysis
-        panel = Panel(
-            response,
-            title=f"analysis of {target}",
-            title_align="left",
-            border_style="blue",
-            padding=(1, 2)
-        )  
-        console.print(panel)
-
-        # Log the conversation to memory
-        command = f"ridge {target} analyze"
-        if any(mode_flags.values()):
-            active_flags = [k for k, v in mode_flags.items() if v]
-            command += f" --{'--'.join(active_flags)}"
-
-        memory_manager.log_conversation(
-            command=command,
-            context_snapshot=f"Analyzed {target} with {agent.name} agent",
-            response=response[:500] + "..." if len(response) > 500 else response
-        )
-
-        click.echo(f"\n✔️ Analysis complete and logged to project memory")
+        # Get AI suggestions
+        console.print(f"\n[blue]🤖 {agent.name.title()} agent analyzing file for improvements...[/blue]")
+        
+        try:
+            response = api.chat_with_agent(agent, prompt, mode_flags)
+            
+            # Extract improved code from response (simple extraction for now)
+            improved_content = extract_code_from_response(response, file_content)
+            
+            if improved_content and improved_content != file_content:
+                # Show side-by-side diff
+                show_diff_side_by_side(file_content, improved_content, target)
+                
+                # Get approval unless --allow-all is set
+                should_apply = allow_all
+                if not allow_all:
+                    should_apply = Confirm.ask(f"\n[yellow]Apply these changes to {target}?[/yellow]")
+                
+                if should_apply:
+                    if not dry_run:
+                        # Apply the changes
+                        with open(target, 'w', encoding='utf-8') as f:
+                            f.write(improved_content)
+                        console.print(f"[green]✅ File {target} updated successfully![/green]")
+                        
+                        # Log to memory
+                        memory_manager.log_conversation(
+                            command=f"edit {target} --{agent.name}",
+                            context_snapshot=file_content[:500] + "...",
+                            response=f"Applied improvements: {len(improved_content)} chars"
+                        )
+                    else:
+                        console.print(f"[yellow]🔍 Dry run - changes not applied to {target}[/yellow]")
+                else:
+                    console.print(f"[yellow]⏭️  Changes not applied to {target}[/yellow]")
+            else:
+                console.print(f"[green]✅ No improvements suggested for {target}[/green]")
+                
+        except Exception as edit_error:
+            console.print(f"[red]❌ Error during editing: {edit_error}[/red]")
     
     except Exception as e:
         click.echo(f"Error during analysis: {str(e)}")
         console.print_exception()
-
 
 def _watch_files(target, agent, api, memory_manager, file_tracker, flags):
     """Watch for file changes and respond automatically"""

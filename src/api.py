@@ -15,9 +15,9 @@ class RidgeAPI:
         # Model selection based on flags
         self.model_map = {
             'quick': 'claude-3-5-haiku-20241022',
-            'default': 'claude-3-5-sonnet-20241022', 
-            'deep': 'claude-3-5-sonnet-20241022',
-            'ultra_deep': 'claude-3-opus-20240229'
+            'default': 'claude-sonnet-4-20250514', 
+            'deep': 'claude-3-7-sonnet-20250219',
+            'ultra_deep': 'claude-opus-4-1-20250805'
         }
     
     def _setup_client(self):
